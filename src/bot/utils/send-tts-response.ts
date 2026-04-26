@@ -8,6 +8,7 @@ const MAX_TTS_INPUT_CHARS = 4_000;
 
 interface TelegramAudioApi {
   sendAudio: (chatId: number, audio: InputFile) => Promise<unknown>;
+  sendVoice: (chatId: number, voice: InputFile) => Promise<unknown>;
   sendMessage: (chatId: number, text: string) => Promise<unknown>;
 }
 
@@ -54,7 +55,12 @@ export async function sendTtsResponseForSession({
 
   try {
     const speech = await synthesizeSpeechImpl(normalizedText);
-    await api.sendAudio(chatId, new InputFile(speech.buffer, speech.filename));
+    const inputFile = new InputFile(speech.buffer, speech.filename);
+    if (speech.mimeType === "audio/ogg") {
+      await api.sendVoice(chatId, inputFile);
+    } else {
+      await api.sendAudio(chatId, inputFile);
+    }
     logger.info(`[TTS] Sent audio reply for session ${sessionId}`);
     return true;
   } catch (error) {

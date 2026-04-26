@@ -118,7 +118,7 @@ async function synthesizeWithOpenAi(text: string): Promise<TtsResult> {
         model: config.tts.model,
         voice: config.tts.voice,
         input: text,
-        response_format: "mp3",
+        response_format: "opus",
       }),
       signal: controller.signal,
     });
@@ -136,7 +136,7 @@ async function synthesizeWithOpenAi(text: string): Promise<TtsResult> {
     }
 
     logger.debug(`[TTS] Generated speech audio: ${buffer.length} bytes`);
-    return { buffer, filename: "assistant-reply.mp3", mimeType: "audio/mpeg" };
+    return { buffer, filename: "assistant-reply.ogg", mimeType: "audio/ogg" };
   } finally {
     clearTimeout(timeout);
   }

@@ -246,8 +246,8 @@ describe("synthesizeSpeech (OpenAI)", () => {
 
     const result = await synthesizeSpeech("Hello world");
 
-    expect(result.filename).toBe("assistant-reply.mp3");
-    expect(result.mimeType).toBe("audio/mpeg");
+    expect(result.filename).toBe("assistant-reply.ogg");
+    expect(result.mimeType).toBe("audio/ogg");
     expect(result.buffer).toEqual(Buffer.from([1, 2, 3]));
 
     expect(fetchSpy).toHaveBeenCalledOnce();
@@ -262,7 +262,7 @@ describe("synthesizeSpeech (OpenAI)", () => {
       model: "gpt-4o-mini-tts",
       voice: "alloy",
       input: "Hello world",
-      response_format: "mp3",
+      response_format: "opus",
     });
   });
 
