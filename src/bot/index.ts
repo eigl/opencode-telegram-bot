@@ -210,7 +210,12 @@ function extractLocalImagePathReferences(text: string): string[] {
 
   for (const match of text.matchAll(LOCAL_IMAGE_PATH_PATTERN)) {
     const rawPath = (match[1] || match[2] || "").replace(/[),.;:]+$/g, "").trim();
-    if (!rawPath || seen.has(rawPath)) {
+    if (
+      !rawPath ||
+      rawPath.startsWith("~") ||
+      /[<>*?]/.test(rawPath) ||
+      seen.has(rawPath)
+    ) {
       continue;
     }
 

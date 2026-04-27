@@ -35,6 +35,7 @@ function createPhotoDeps(overrides: Partial<PhotoHandlerDeps> = {}): {
   processPromptMock: ReturnType<typeof vi.fn>;
   downloadMock: ReturnType<typeof vi.fn>;
   getCapabilitiesMock: ReturnType<typeof vi.fn>;
+  savePhotoFileMock: ReturnType<typeof vi.fn>;
 } {
   const processPromptMock = vi.fn().mockResolvedValue(true);
   const downloadMock = vi.fn().mockImplementation((_api, fileId: string) =>
@@ -46,6 +47,10 @@ function createPhotoDeps(overrides: Partial<PhotoHandlerDeps> = {}): {
   const getCapabilitiesMock = vi.fn().mockResolvedValue({
     input: { image: true, pdf: true, audio: false, video: false },
   });
+  const savePhotoFileMock = vi.fn().mockImplementation(
+    (_buffer: Buffer, filename: string, requestId: string) =>
+      Promise.resolve(`_output/telegram-image-requests/${requestId}/input/${filename}`),
+  );
 
   const deps: PhotoHandlerDeps = {
     bot: {} as PhotoHandlerDeps["bot"],
@@ -57,11 +62,12 @@ function createPhotoDeps(overrides: Partial<PhotoHandlerDeps> = {}): {
       modelID: "test-model",
     }),
     processPrompt: processPromptMock,
+    savePhotoFile: savePhotoFileMock,
     mediaGroupDebounceMs: 25,
     ...overrides,
   };
 
-  return { deps, processPromptMock, downloadMock, getCapabilitiesMock };
+  return { deps, processPromptMock, downloadMock, getCapabilitiesMock, savePhotoFileMock };
 }
 
 async function waitForTimers(): Promise<void> {
@@ -90,7 +96,9 @@ describe("bot/handlers/photo", () => {
     expect(downloadMock).toHaveBeenCalledWith(ctx.api, "large-photo");
     expect(processPromptMock).toHaveBeenCalledWith(
       ctx,
-      "Analyze this",
+      expect.stringMatching(
+        /Analyze this\n\nTelegram image local copy path\(s\):\n- _output\/telegram-image-requests\/[^/]+\/input\/photo\.jpg/,
+      ),
       deps,
       [
         expect.objectContaining({
@@ -137,7 +145,9 @@ describe("bot/handlers/photo", () => {
     expect(processPromptMock).toHaveBeenCalledTimes(1);
     expect(processPromptMock).toHaveBeenCalledWith(
       first.ctx,
-      "Compare these screenshots",
+      expect.stringMatching(
+        /Compare these screenshots\n\nTelegram image local copy path\(s\):\n- _output\/telegram-image-requests\/[^/]+\/input\/photo-1\.jpg\n- _output\/telegram-image-requests\/[^/]+\/input\/photo-2\.jpg/,
+      ),
       deps,
       [
         expect.objectContaining({ filename: "photo-1.jpg" }),
@@ -159,5 +169,47 @@ describe("bot/handlers/photo", () => {
     expect(replyMock).toHaveBeenCalledWith(t("bot.photo_model_no_image"));
     expect(downloadMock).not.toHaveBeenCalled();
     expect(processPromptMock).toHaveBeenCalledWith(ctx, "Analyze this", deps);
+  });
+
+  it("keeps image generation captions on OpenCode path with local copy context", async () => {
+    const { ctx, replyMock } = createPhotoContext({
+      caption: "Generate an anime style picture",
+    });
+    const { deps, processPromptMock, downloadMock, getCapabilitiesMock, savePhotoFileMock } =
+      createPhotoDeps();
+
+    await handlePhotoMessage(ctx, deps);
+
+    expect(replyMock).toHaveBeenCalledWith(t("bot.photo_downloading"));
+    expect(downloadMock).toHaveBeenCalledWith(ctx.api, "large-photo");
+    expect(getCapabilitiesMock).toHaveBeenCalled();
+    expect(savePhotoFileMock).toHaveBeenCalledWith(
+      Buffer.from("image:large-photo"),
+      "photo.jpg",
+      expect.any(String),
+    );
+    expect(processPromptMock).toHaveBeenCalledWith(
+      ctx,
+      expect.stringMatching(
+        /Generate an anime style picture\n\nTelegram image local copy path\(s\):\n- _output\/telegram-image-requests\/[^/]+\/input\/photo\.jpg/,
+      ),
+      deps,
+      [
+        expect.objectContaining({
+          type: "file",
+          mime: "image/jpeg",
+          filename: "photo.jpg",
+        }),
+      ],
+    );
+  });
+
+  it("keeps normal photo prompts on the OpenCode vision path", async () => {
+    const { ctx } = createPhotoContext({ caption: "What is in this image?" });
+    const { deps, processPromptMock } = createPhotoDeps();
+
+    await handlePhotoMessage(ctx, deps);
+
+    expect(processPromptMock).toHaveBeenCalledTimes(1);
   });
 });
