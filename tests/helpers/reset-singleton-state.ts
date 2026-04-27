@@ -3,6 +3,7 @@ interface SummaryAggregatorPrivateState {
   onPartialCallback: null;
   onToolCallback: null;
   onToolFileCallback: null;
+  onAssistantFileCallback: null;
   onQuestionCallback: null;
   onQuestionErrorCallback: null;
   onThinkingCallback: null;
@@ -81,6 +82,7 @@ export async function resetSingletonState(): Promise<void> {
   aggregator.onPartialCallback = null;
   aggregator.onToolCallback = null;
   aggregator.onToolFileCallback = null;
+  aggregator.onAssistantFileCallback = null;
   aggregator.onQuestionCallback = null;
   aggregator.onQuestionErrorCallback = null;
   aggregator.onThinkingCallback = null;

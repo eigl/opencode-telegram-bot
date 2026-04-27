@@ -25,6 +25,7 @@ describe("summary/aggregator", () => {
     summaryAggregator.setOnCleared(() => {});
     summaryAggregator.setOnTool(() => {});
     summaryAggregator.setOnToolFile(() => {});
+    summaryAggregator.setOnAssistantFile(() => {});
     summaryAggregator.setOnPartial(() => {});
     summaryAggregator.setOnExternalUserInput(() => {});
     summaryAggregator.setOnThinking(() => {});
@@ -1372,6 +1373,87 @@ describe("summary/aggregator", () => {
     expect(filePayload.hasFileAttachment).toBe(true);
     expect(filePayload.fileData.filename).toBe("edit_README.md.txt");
     expect(filePayload.fileData.buffer.toString("utf8")).toContain("Edit File/Path: README.md");
+  });
+
+  it("emits assistant file parts for generated image delivery", () => {
+    const onAssistantFile = vi.fn();
+    summaryAggregator.setOnAssistantFile(onAssistantFile);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-image",
+          sessionID: "session-1",
+          role: "assistant",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    const filePartEvent = {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-image",
+          sessionID: "session-1",
+          messageID: "message-image",
+          type: "file",
+          mime: "image/png",
+          filename: "cake-box-anime.png",
+          url: "/file/content?path=generated.png",
+        },
+      },
+    } as unknown as Event;
+
+    summaryAggregator.processEvent(filePartEvent);
+    summaryAggregator.processEvent(filePartEvent);
+
+    expect(onAssistantFile).toHaveBeenCalledTimes(1);
+    expect(onAssistantFile).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      messageId: "message-image",
+      partId: "part-image",
+      mime: "image/png",
+      filename: "cake-box-anime.png",
+      url: "/file/content?path=generated.png",
+    });
+  });
+
+  it("does not emit user file parts back to Telegram", () => {
+    const onAssistantFile = vi.fn();
+    summaryAggregator.setOnAssistantFile(onAssistantFile);
+    summaryAggregator.setSession("session-1");
+
+    summaryAggregator.processEvent({
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-user-image",
+          sessionID: "session-1",
+          role: "user",
+          time: { created: Date.now() },
+        },
+      },
+    } as unknown as Event);
+
+    summaryAggregator.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-user-image",
+          sessionID: "session-1",
+          messageID: "message-user-image",
+          type: "file",
+          mime: "image/jpeg",
+          filename: "input.jpg",
+          url: "/file/content?path=input.jpg",
+        },
+      },
+    } as unknown as Event);
+
+    expect(onAssistantFile).not.toHaveBeenCalled();
   });
 
   it("fires onTokens with isCompleted=true when message has completed timestamp", () => {

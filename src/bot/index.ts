@@ -108,6 +108,7 @@ let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 const TELEGRAM_DOCUMENT_CAPTION_MAX_LENGTH = 1024;
 const RESPONSE_STREAM_THROTTLE_MS = config.bot.responseStreamThrottleMs;
 const RESPONSE_STREAM_TEXT_LIMIT = 3800;
+const LOCAL_IMAGE_PATH_PATTERN = /`([^`]+\.(?:png|jpe?g|webp|gif))`|([^\s`'"<>]+\.(?:png|jpe?g|webp|gif))/gi;
 const SESSION_RETRY_PREFIX = "🔁";
 const SUBAGENT_STREAM_PREFIX = "🧩";
 const __filename = fileURLToPath(import.meta.url);
@@ -123,6 +124,14 @@ function getCurrentReplyKeyboard() {
   return keyboardManager.getKeyboard();
 }
 
+function getBotChatContext(): { bot: Bot; chatId: number } | null {
+  if (!botInstance || chatIdInstance === null) {
+    return null;
+  }
+
+  return { bot: botInstance, chatId: chatIdInstance };
+}
+
 function prepareDocumentCaption(caption: string): string {
   const normalizedCaption = caption.trim();
   if (!normalizedCaption) {
@@ -134,6 +143,133 @@ function prepareDocumentCaption(caption: string): string {
   }
 
   return `${normalizedCaption.slice(0, TELEGRAM_DOCUMENT_CAPTION_MAX_LENGTH - 3)}...`;
+}
+
+function getOpencodeAuthorizationHeader(): string | undefined {
+  if (!config.opencode.password) {
+    return undefined;
+  }
+
+  const credentials = `${config.opencode.username}:${config.opencode.password}`;
+  return `Basic ${Buffer.from(credentials).toString("base64")}`;
+}
+
+function resolveAssistantFileUrl(fileUrl: string): string {
+  const baseUrl = new URL(config.opencode.apiUrl);
+  const resolvedUrl = new URL(fileUrl, baseUrl);
+
+  if (resolvedUrl.origin !== baseUrl.origin) {
+    throw new Error(`Refusing to download assistant file from unexpected origin: ${resolvedUrl.origin}`);
+  }
+
+  return resolvedUrl.toString();
+}
+
+function getAssistantFileName(fileUrl: string, filename?: string): string {
+  if (filename?.trim()) {
+    return path.basename(filename.trim());
+  }
+
+  const urlPathname = new URL(fileUrl, config.opencode.apiUrl).pathname;
+  const basename = path.basename(urlPathname);
+  return basename || "assistant-file";
+}
+
+async function downloadAssistantFile(fileUrl: string): Promise<Buffer> {
+  const authorization = getOpencodeAuthorizationHeader();
+  const response = await fetch(resolveAssistantFileUrl(fileUrl), {
+    headers: authorization ? { Authorization: authorization } : undefined,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download assistant file: ${response.status} ${response.statusText}`);
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function getImageMimeType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".png":
+    default:
+      return "image/png";
+  }
+}
+
+function extractLocalImagePathReferences(text: string): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+
+  for (const match of text.matchAll(LOCAL_IMAGE_PATH_PATTERN)) {
+    const rawPath = (match[1] || match[2] || "").replace(/[),.;:]+$/g, "").trim();
+    if (!rawPath || seen.has(rawPath)) {
+      continue;
+    }
+
+    seen.add(rawPath);
+    paths.push(rawPath);
+  }
+
+  return paths.slice(0, 4);
+}
+
+function resolveSessionLocalPath(sessionDirectory: string, filePath: string): string | null {
+  if (filePath.includes("\0")) {
+    return null;
+  }
+
+  const root = path.resolve(sessionDirectory);
+  const resolved = path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(root, filePath);
+  const relative = path.relative(root, resolved);
+
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return null;
+  }
+
+  return resolved;
+}
+
+async function enqueueLocalImageReferences(
+  sessionId: string,
+  sessionDirectory: string,
+  messageText: string,
+): Promise<void> {
+  const imagePaths = extractLocalImagePathReferences(messageText);
+  if (imagePaths.length === 0) {
+    return;
+  }
+
+  for (const imagePath of imagePaths) {
+    const resolvedPath = resolveSessionLocalPath(sessionDirectory, imagePath);
+    if (!resolvedPath) {
+      logger.warn(`[Bot] Skipping image path outside session directory: ${imagePath}`);
+      continue;
+    }
+
+    try {
+      const buffer = await fs.readFile(resolvedPath);
+      const filename = path.basename(resolvedPath);
+      logger.info(`[Bot] Sending referenced local image: ${imagePath}`);
+      toolMessageBatcher.enqueueFile(sessionId, {
+        buffer,
+        filename,
+        mimeType: getImageMimeType(resolvedPath),
+        caption: prepareDocumentCaption(`Generated image: ${filename}`),
+      });
+    } catch (err) {
+      logger.warn(`[Bot] Failed to read referenced local image: ${imagePath}`, err);
+    }
+  }
+
+  await toolMessageBatcher.flushSession(sessionId, "local_image_references");
 }
 
 function prepareStreamingPayload(messageText: string): StreamingMessagePayload | null {
@@ -187,17 +323,32 @@ const toolMessageBatcher = new ToolMessageBatcher({
       return;
     }
 
-    const tempFilePath = path.join(TEMP_DIR, fileData.filename);
+    const filename = path.basename(fileData.filename);
+    const tempFilePath = path.join(TEMP_DIR, filename);
 
     try {
       logger.debug(
-        `[Bot] Sending code file: ${fileData.filename} (${fileData.buffer.length} bytes, session=${sessionId})`,
+        `[Bot] Sending file: ${filename} (${fileData.buffer.length} bytes, session=${sessionId}, mime=${fileData.mimeType || "unknown"})`,
       );
+
+      const keyboard = getCurrentReplyKeyboard();
+      const inputFile = new InputFile(fileData.buffer, filename);
+
+      if (fileData.mimeType?.startsWith("image/")) {
+        try {
+          await botInstance.api.sendPhoto(chatIdInstance, inputFile, {
+            caption: fileData.caption,
+            disable_notification: true,
+            ...(keyboard ? { reply_markup: keyboard } : {}),
+          });
+          return;
+        } catch (err) {
+          logger.warn(`[Bot] Failed to send image as photo, falling back to document: ${filename}`, err);
+        }
+      }
 
       await fs.mkdir(TEMP_DIR, { recursive: true });
       await fs.writeFile(tempFilePath, fileData.buffer);
-
-      const keyboard = getCurrentReplyKeyboard();
 
       await botInstance.api.sendDocument(chatIdInstance, new InputFile(tempFilePath), {
         caption: fileData.caption,
@@ -213,26 +364,28 @@ const toolMessageBatcher = new ToolMessageBatcher({
 const responseStreamer = new ResponseStreamer({
   throttleMs: RESPONSE_STREAM_THROTTLE_MS,
   sendPart: async (part, options) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for streamed send");
     }
 
     return sendRenderedBotPart({
-      api: botInstance.api,
-      chatId: chatIdInstance,
+      api: context.bot.api,
+      chatId: context.chatId,
       part,
       options,
     });
   },
   editPart: async (messageId, part, options) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for streamed edit");
     }
 
     try {
       return await editRenderedBotPart({
-        api: botInstance.api,
-        chatId: chatIdInstance,
+        api: context.bot.api,
+        chatId: context.chatId,
         messageId,
         part,
         options,
@@ -250,11 +403,12 @@ const responseStreamer = new ResponseStreamer({
     }
   },
   deleteText: async (messageId) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for streamed delete");
     }
 
-    await botInstance.api.deleteMessage(chatIdInstance, messageId).catch((error) => {
+    await context.bot.api.deleteMessage(context.chatId, messageId).catch((error) => {
       const errorMessage =
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       if (
@@ -272,7 +426,8 @@ const responseStreamer = new ResponseStreamer({
 const toolCallStreamer = new ToolCallStreamer({
   throttleMs: RESPONSE_STREAM_THROTTLE_MS,
   sendText: async (sessionId, text) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for tool stream send");
     }
 
@@ -281,14 +436,15 @@ const toolCallStreamer = new ToolCallStreamer({
       throw new Error(`Tool stream session mismatch for send: ${sessionId}`);
     }
 
-    const sentMessage = await botInstance.api.sendMessage(chatIdInstance, text, {
+    const sentMessage = await context.bot.api.sendMessage(context.chatId, text, {
       disable_notification: true,
     });
 
     return sentMessage.message_id;
   },
   editText: async (sessionId, messageId, text) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for tool stream edit");
     }
 
@@ -298,7 +454,7 @@ const toolCallStreamer = new ToolCallStreamer({
     }
 
     try {
-      await botInstance.api.editMessageText(chatIdInstance, messageId, text);
+      await context.bot.api.editMessageText(context.chatId, messageId, text);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
@@ -310,7 +466,8 @@ const toolCallStreamer = new ToolCallStreamer({
     }
   },
   deleteText: async (sessionId, messageId) => {
-    if (!botInstance || !chatIdInstance || chatIdInstance <= 0) {
+    const context = getBotChatContext();
+    if (!context) {
       throw new Error("Bot context missing for tool stream delete");
     }
 
@@ -319,7 +476,7 @@ const toolCallStreamer = new ToolCallStreamer({
       throw new Error(`Tool stream session mismatch for delete: ${sessionId}`);
     }
 
-    await botInstance.api.deleteMessage(chatIdInstance, messageId).catch((error) => {
+    await context.bot.api.deleteMessage(context.chatId, messageId).catch((error) => {
       const errorMessage =
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       if (
@@ -502,6 +659,8 @@ async function ensureEventSubscription(directory: string): Promise<void> {
           chatId,
           text: messageText,
         });
+
+        await enqueueLocalImageReferences(sessionId, currentSession.directory, messageText);
       } catch (err) {
         clearPromptResponseMode(sessionId);
         assistantRunState.clearRun(sessionId, "assistant_finalize_failed");
@@ -629,6 +788,35 @@ async function ensureEventSubscription(directory: string): Promise<void> {
       });
     } catch (err) {
       logger.error("Failed to send file to Telegram:", err);
+    }
+  });
+
+  summaryAggregator.setOnAssistantFile(async (fileInfo) => {
+    if (!botInstance || !chatIdInstance) {
+      logger.error("Bot or chat ID not available for sending assistant file");
+      return;
+    }
+
+    const currentSession = getCurrentSession();
+    if (!currentSession || currentSession.id !== fileInfo.sessionId) {
+      return;
+    }
+
+    try {
+      await toolCallStreamer.breakSession(fileInfo.sessionId, "assistant_file_boundary");
+
+      const filename = getAssistantFileName(fileInfo.url, fileInfo.filename);
+      const buffer = await downloadAssistantFile(fileInfo.url);
+      const label = fileInfo.mime.startsWith("image/") ? "Generated image" : "Generated file";
+
+      toolMessageBatcher.enqueueFile(fileInfo.sessionId, {
+        buffer,
+        filename,
+        mimeType: fileInfo.mime,
+        caption: prepareDocumentCaption(`${label}: ${filename}`),
+      });
+    } catch (err) {
+      logger.error("Failed to send assistant file to Telegram:", err);
     }
   });
 

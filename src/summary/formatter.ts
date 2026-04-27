@@ -461,6 +461,7 @@ export interface CodeFileData {
   buffer: Buffer;
   filename: string;
   caption: string;
+  mimeType?: string;
 }
 
 function formatDiff(diff: string): string {
