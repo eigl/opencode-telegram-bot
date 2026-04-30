@@ -339,6 +339,19 @@ const toolMessageBatcher = new ToolMessageBatcher({
       const keyboard = getCurrentReplyKeyboard();
       const inputFile = new InputFile(fileData.buffer, filename);
 
+      if (fileData.mimeType === "image/gif") {
+        try {
+          await botInstance.api.sendAnimation(chatIdInstance, inputFile, {
+            caption: fileData.caption,
+            disable_notification: true,
+            ...(keyboard ? { reply_markup: keyboard } : {}),
+          });
+          return;
+        } catch (err) {
+          logger.warn(`[Bot] Failed to send GIF as animation, falling back to document: ${filename}`, err);
+        }
+      }
+
       if (fileData.mimeType?.startsWith("image/")) {
         try {
           await botInstance.api.sendPhoto(chatIdInstance, inputFile, {
