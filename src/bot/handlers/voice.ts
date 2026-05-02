@@ -13,6 +13,8 @@ import { t } from "../../i18n/index.js";
 
 const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 30_000;
 const TELEGRAM_DOWNLOAD_MAX_REDIRECTS = 3;
+const TELEGRAM_DOWNLOAD_ATTEMPTS = 3;
+const TELEGRAM_DOWNLOAD_RETRY_DELAY_MS = 500;
 
 let telegramDownloadAgent: https.RequestOptions["agent"] | null | undefined;
 
@@ -33,6 +35,19 @@ function getTelegramDownloadAgent(): https.RequestOptions["agent"] | undefined {
 
   logger.info(`[Voice] Using Telegram download proxy: ${proxyUrl.replace(/\/\/.*@/, "//***@")}`);
   return telegramDownloadAgent;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDownloadError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = error.cause instanceof Error ? `; cause: ${error.cause.message}` : "";
+    return `${error.name}: ${error.message}${cause}`;
+  }
+
+  return String(error);
 }
 
 async function downloadTelegramFileByUrl(url: string, redirectDepth: number = 0): Promise<Buffer> {
@@ -127,7 +142,31 @@ async function downloadTelegramFile(
 
     logger.debug(`[Voice] Downloading file: ${file.file_path} (${file.file_size ?? "?"} bytes)`);
 
-    const buffer = await downloadTelegramFileByUrl(fileUrl);
+    let buffer: Buffer | null = null;
+    let lastDownloadError: unknown;
+    for (let attempt = 1; attempt <= TELEGRAM_DOWNLOAD_ATTEMPTS; attempt++) {
+      try {
+        buffer = await downloadTelegramFileByUrl(fileUrl);
+        break;
+      } catch (err) {
+        lastDownloadError = err;
+
+        if (attempt === TELEGRAM_DOWNLOAD_ATTEMPTS) {
+          break;
+        }
+
+        logger.warn(
+          `[Voice] Telegram file download attempt ${attempt}/${TELEGRAM_DOWNLOAD_ATTEMPTS} failed: ${formatDownloadError(err)}`,
+        );
+        await sleep(TELEGRAM_DOWNLOAD_RETRY_DELAY_MS * attempt);
+      }
+    }
+
+    if (!buffer) {
+      throw new Error(
+        `Telegram file download failed after ${TELEGRAM_DOWNLOAD_ATTEMPTS} attempts: ${formatDownloadError(lastDownloadError)}`,
+      );
+    }
 
     // Extract filename from file_path (e.g., "voice/file_123.oga" -> "file_123.oga")
     let filename = file.file_path.split("/").pop() || "audio.ogg";
