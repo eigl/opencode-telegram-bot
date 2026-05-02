@@ -55,6 +55,10 @@ export function clearPromptResponseMode(sessionId: string): void {
   promptResponseModes.delete(sessionId);
 }
 
+export function getPromptResponseMode(sessionId: string): PromptResponseMode | null {
+  return promptResponseModes.get(sessionId) ?? null;
+}
+
 export function consumePromptResponseMode(sessionId: string): PromptResponseMode | null {
   const responseMode = promptResponseModes.get(sessionId) ?? null;
   promptResponseModes.delete(sessionId);

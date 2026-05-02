@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { InputFile } from "grammy";
 import { sendTtsResponseForSession } from "../../../src/bot/utils/send-tts-response.js";
+import {
+  clearPromptResponseMode,
+  setPromptResponseMode,
+} from "../../../src/bot/handlers/prompt.js";
 import { t } from "../../../src/i18n/index.js";
 
 vi.mock("../../../src/utils/logger.js", () => ({
@@ -28,7 +32,7 @@ describe("bot/utils/send-tts-response", () => {
       sessionId: "session-1",
       chatId: 123,
       text: "Hello from audio",
-      consumeResponseMode: () => "text_and_tts",
+      getResponseMode: () => "text_and_tts",
       isTtsConfigured: () => true,
       synthesizeSpeech: synthesizeSpeechMock,
     });
@@ -40,6 +44,48 @@ describe("bot/utils/send-tts-response", () => {
     const [chatId, inputFile] = sendAudioMock.mock.calls[0];
     expect(chatId).toBe(123);
     expect(inputFile).toBeInstanceOf(InputFile);
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps TTS enabled for multiple assistant messages in one session", async () => {
+    const sendAudioMock = vi.fn().mockResolvedValue(undefined);
+    const sendVoiceMock = vi.fn().mockResolvedValue(undefined);
+    const sendMessageMock = vi.fn().mockResolvedValue(undefined);
+    const synthesizeSpeechMock = vi.fn().mockResolvedValue({
+      buffer: Buffer.from("mp3"),
+      filename: "assistant-reply.mp3",
+      mimeType: "audio/mpeg",
+    });
+    const sessionId = "session-multi-message";
+
+    setPromptResponseMode(sessionId, "text_and_tts");
+    try {
+      await sendTtsResponseForSession({
+        api: { sendAudio: sendAudioMock, sendVoice: sendVoiceMock, sendMessage: sendMessageMock },
+        sessionId,
+        chatId: 123,
+        text: "First assistant message",
+        isTtsConfigured: () => true,
+        synthesizeSpeech: synthesizeSpeechMock,
+      });
+
+      await sendTtsResponseForSession({
+        api: { sendAudio: sendAudioMock, sendVoice: sendVoiceMock, sendMessage: sendMessageMock },
+        sessionId,
+        chatId: 123,
+        text: "Second assistant message",
+        isTtsConfigured: () => true,
+        synthesizeSpeech: synthesizeSpeechMock,
+      });
+    } finally {
+      clearPromptResponseMode(sessionId);
+    }
+
+    expect(synthesizeSpeechMock).toHaveBeenCalledTimes(2);
+    expect(synthesizeSpeechMock).toHaveBeenNthCalledWith(1, "First assistant message");
+    expect(synthesizeSpeechMock).toHaveBeenNthCalledWith(2, "Second assistant message");
+    expect(sendAudioMock).toHaveBeenCalledTimes(2);
+    expect(sendVoiceMock).not.toHaveBeenCalled();
     expect(sendMessageMock).not.toHaveBeenCalled();
   });
 
@@ -58,7 +104,7 @@ describe("bot/utils/send-tts-response", () => {
       sessionId: "session-1",
       chatId: 123,
       text: "Hello from voice",
-      consumeResponseMode: () => "text_and_tts",
+      getResponseMode: () => "text_and_tts",
       isTtsConfigured: () => true,
       synthesizeSpeech: synthesizeSpeechMock,
     });
@@ -83,7 +129,7 @@ describe("bot/utils/send-tts-response", () => {
       sessionId: "session-1",
       chatId: 123,
       text: "Hello from text",
-      consumeResponseMode: () => "text_only",
+      getResponseMode: () => "text_only",
       isTtsConfigured: () => true,
       synthesizeSpeech: synthesizeSpeechMock,
     });
@@ -106,7 +152,7 @@ describe("bot/utils/send-tts-response", () => {
       sessionId: "session-1",
       chatId: 123,
       text: "Hello from audio",
-      consumeResponseMode: () => "text_and_tts",
+      getResponseMode: () => "text_and_tts",
       isTtsConfigured: () => false,
       synthesizeSpeech: synthesizeSpeechMock,
     });
@@ -133,7 +179,7 @@ describe("bot/utils/send-tts-response", () => {
       sessionId: "session-1",
       chatId: 123,
       text: "Hello from audio",
-      consumeResponseMode: () => "text_and_tts",
+      getResponseMode: () => "text_and_tts",
       isTtsConfigured: () => true,
       synthesizeSpeech: synthesizeSpeechMock,
     });

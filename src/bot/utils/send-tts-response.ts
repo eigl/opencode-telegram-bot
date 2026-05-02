@@ -1,5 +1,5 @@
 import { InputFile } from "grammy";
-import { consumePromptResponseMode } from "../handlers/prompt.js";
+import { getPromptResponseMode } from "../handlers/prompt.js";
 import { isTtsConfigured, synthesizeSpeech, type TtsResult } from "../../tts/client.js";
 import { t } from "../../i18n/index.js";
 import { logger } from "../../utils/logger.js";
@@ -17,7 +17,7 @@ interface SendTtsResponseParams {
   sessionId: string;
   chatId: number;
   text: string;
-  consumeResponseMode?: (sessionId: string) => "text_only" | "text_and_tts" | null;
+  getResponseMode?: (sessionId: string) => "text_only" | "text_and_tts" | null;
   isTtsConfigured?: () => boolean;
   synthesizeSpeech?: (text: string) => Promise<TtsResult>;
 }
@@ -27,11 +27,11 @@ export async function sendTtsResponseForSession({
   sessionId,
   chatId,
   text,
-  consumeResponseMode: consumeResponseModeImpl = consumePromptResponseMode,
+  getResponseMode: getResponseModeImpl = getPromptResponseMode,
   isTtsConfigured: isTtsConfiguredImpl = isTtsConfigured,
   synthesizeSpeech: synthesizeSpeechImpl = synthesizeSpeech,
 }: SendTtsResponseParams): Promise<boolean> {
-  const responseMode = consumeResponseModeImpl(sessionId);
+  const responseMode = getResponseModeImpl(sessionId);
   if (responseMode !== "text_and_tts") {
     return false;
   }
