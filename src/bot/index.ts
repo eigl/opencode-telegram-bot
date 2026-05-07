@@ -138,6 +138,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TEMP_DIR = path.join(__dirname, "..", ".tmp");
 const sessionCompletionTasks = new Map<string, Promise<void>>();
+const latestTtsResponseTexts = new Map<string, string>();
 
 function getCurrentReplyKeyboard() {
   if (!keyboardManager.isInitialized()) {
@@ -688,6 +689,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
       if (!botInstance || !chatIdInstance) {
         logger.error("Bot or chat ID not available for sending message");
         clearPromptResponseMode(sessionId);
+        latestTtsResponseTexts.delete(sessionId);
         responseStreamer.clearMessage(sessionId, messageId, "bot_context_missing");
         toolCallStreamer.clearSession(sessionId, "bot_context_missing");
         assistantRunState.clearRun(sessionId, "bot_context_missing");
@@ -698,6 +700,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
       const currentSession = getCurrentSession();
       if (currentSession?.id !== sessionId) {
         clearPromptResponseMode(sessionId);
+        latestTtsResponseTexts.delete(sessionId);
         responseStreamer.clearMessage(sessionId, messageId, "session_mismatch");
         toolCallStreamer.clearSession(sessionId, "session_mismatch");
         assistantRunState.clearRun(sessionId, "session_mismatch");
@@ -739,16 +742,12 @@ async function ensureEventSubscription(directory: string): Promise<void> {
           },
         });
 
-        await sendTtsResponseForSession({
-          api: botApi,
-          sessionId,
-          chatId,
-          text: messageText,
-        });
+        latestTtsResponseTexts.set(sessionId, messageText);
 
         await enqueueLocalImageReferences(sessionId, currentSession.directory, messageText);
       } catch (err) {
         clearPromptResponseMode(sessionId);
+        latestTtsResponseTexts.delete(sessionId);
         assistantRunState.clearRun(sessionId, "assistant_finalize_failed");
         logger.error("Failed to send message to Telegram:", err);
         // Stop processing events after critical error to prevent infinite loop
@@ -1070,15 +1069,18 @@ async function ensureEventSubscription(directory: string): Promise<void> {
     await sessionCompletionTasks.get(sessionId)?.catch(() => undefined);
 
     const completedRun = assistantRunState.finishRun(sessionId, "session_idle");
-    clearPromptResponseMode(sessionId);
 
     if (!botInstance || !chatIdInstance) {
+      clearPromptResponseMode(sessionId);
+      latestTtsResponseTexts.delete(sessionId);
       foregroundSessionState.markIdle(sessionId);
       return;
     }
 
     const currentSession = getCurrentSession();
     if (!currentSession || currentSession.id !== sessionId) {
+      clearPromptResponseMode(sessionId);
+      latestTtsResponseTexts.delete(sessionId);
       foregroundSessionState.markIdle(sessionId);
       await scheduledTaskRuntime.flushDeferredDeliveries();
       return;
@@ -1089,6 +1091,16 @@ async function ensureEventSubscription(directory: string): Promise<void> {
         toolMessageBatcher.flushSession(sessionId, "session_idle"),
         toolCallStreamer.flushSession(sessionId, "session_idle"),
       ]);
+
+      const ttsText = latestTtsResponseTexts.get(sessionId);
+      if (ttsText) {
+        await sendTtsResponseForSession({
+          api: botInstance.api,
+          sessionId,
+          chatId: chatIdInstance,
+          text: ttsText,
+        });
+      }
 
       if (completedRun?.hasCompletedResponse) {
         const agent = completedRun.actualAgent || completedRun.configuredAgent;
@@ -1114,6 +1126,8 @@ async function ensureEventSubscription(directory: string): Promise<void> {
     } catch (err) {
       logger.error("[Bot] Failed to send session idle footer:", err);
     } finally {
+      clearPromptResponseMode(sessionId);
+      latestTtsResponseTexts.delete(sessionId);
       foregroundSessionState.markIdle(sessionId);
       await scheduledTaskRuntime.flushDeferredDeliveries();
     }
@@ -1123,6 +1137,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
     await markAttachedSessionIdle(sessionId);
     if (!botInstance || !chatIdInstance) {
       clearPromptResponseMode(sessionId);
+      latestTtsResponseTexts.delete(sessionId);
       assistantRunState.clearRun(sessionId, "session_error_no_bot_context");
       foregroundSessionState.markIdle(sessionId);
       return;
@@ -1131,6 +1146,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
     const currentSession = getCurrentSession();
     if (!currentSession || currentSession.id !== sessionId) {
       clearPromptResponseMode(sessionId);
+      latestTtsResponseTexts.delete(sessionId);
       responseStreamer.clearSession(sessionId, "session_error_not_current");
       toolCallStreamer.clearSession(sessionId, "session_error_not_current");
       assistantRunState.clearRun(sessionId, "session_error_not_current");
@@ -1141,6 +1157,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
 
     responseStreamer.clearSession(sessionId, "session_error");
     clearPromptResponseMode(sessionId);
+    latestTtsResponseTexts.delete(sessionId);
     assistantRunState.clearRun(sessionId, "session_error");
     await Promise.all([
       toolMessageBatcher.flushSession(sessionId, "session_error"),
@@ -1261,6 +1278,7 @@ async function ensureEventSubscription(directory: string): Promise<void> {
 export function createBot(): Bot<Context> {
   clearAllInteractionState("bot_startup");
   sessionCompletionTasks.clear();
+  latestTtsResponseTexts.clear();
   attachManager.clear("bot_startup");
   assistantRunState.clearAll("bot_startup");
   backgroundSessionTracker.clear();
@@ -1672,6 +1690,7 @@ export function cleanupBotRuntime(reason: string): void {
   toolCallStreamer.clearAll(reason);
   toolMessageBatcher.clearAll(reason);
   sessionCompletionTasks.clear();
+  latestTtsResponseTexts.clear();
   assistantRunState.clearAll(reason);
 
   if (heartbeatTimer) {

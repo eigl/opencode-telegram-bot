@@ -2,7 +2,8 @@ import { config } from "../config.js";
 import { logger } from "../utils/logger.js";
 import textToSpeech from "@google-cloud/text-to-speech";
 
-const TTS_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_TTS_REQUEST_TIMEOUT_MS = 60_000;
+const OPENAI_TTS_TIMEOUT_RETRIES = 1;
 
 export interface TtsResult {
   buffer: Buffer;
@@ -74,6 +75,7 @@ async function synthesizeWithGoogle(text: string): Promise<TtsResult> {
   const client = getGoogleClient();
   const voiceName = config.tts.voice || "en-US-Studio-O";
   const languageCode = extractLanguageCode(voiceName);
+  const timeoutMs = getTtsRequestTimeoutMs();
 
   logger.debug(
     `[TTS] Google Cloud TTS: voice=${voiceName}, languageCode=${languageCode}, chars=${text.length}`,
@@ -85,7 +87,7 @@ async function synthesizeWithGoogle(text: string): Promise<TtsResult> {
       voice: { languageCode, name: voiceName },
       audioConfig: { audioEncoding: "MP3" },
     },
-    { timeout: TTS_REQUEST_TIMEOUT_MS },
+    { timeout: timeoutMs },
   );
 
   const raw = response.audioContent;
@@ -99,47 +101,60 @@ async function synthesizeWithGoogle(text: string): Promise<TtsResult> {
 
 async function synthesizeWithOpenAi(text: string): Promise<TtsResult> {
   const url = `${config.tts.apiUrl}/audio/speech`;
+  const timeoutMs = getTtsRequestTimeoutMs();
 
   logger.debug(
     `[TTS] OpenAI-compatible: url=${url}, model=${config.tts.model}, voice=${config.tts.voice}, chars=${text.length}`,
   );
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TTS_REQUEST_TIMEOUT_MS);
+  for (let attempt = 0; attempt <= OPENAI_TTS_TIMEOUT_RETRIES; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.tts.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: config.tts.model,
-        voice: config.tts.voice,
-        input: text,
-        response_format: "mp3",
-      }),
-      signal: controller.signal,
-    });
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${config.tts.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: config.tts.model,
+          voice: config.tts.voice,
+          input: text,
+          response_format: "opus",
+        }),
+        signal: controller.signal,
+      });
 
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => "");
-      throw new Error(
-        `TTS API returned HTTP ${response.status}: ${errorBody || response.statusText}`,
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => "");
+        throw new Error(
+          `TTS API returned HTTP ${response.status}: ${errorBody || response.statusText}`,
+        );
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length === 0) {
+        throw new Error("TTS API returned an empty audio response");
+      }
+
+      logger.debug(`[TTS] Generated speech audio: ${buffer.length} bytes`);
+      return { buffer, filename: "assistant-reply.ogg", mimeType: "audio/ogg" };
+    } catch (err) {
+      if (!isTimeoutError(err) || attempt >= OPENAI_TTS_TIMEOUT_RETRIES) {
+        throw err;
+      }
+
+      logger.warn(
+        `[TTS] OpenAI-compatible request timed out after ${timeoutMs}ms; retrying once`,
       );
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length === 0) {
-      throw new Error("TTS API returned an empty audio response");
-    }
-
-    logger.debug(`[TTS] Generated speech audio: ${buffer.length} bytes`);
-    return { buffer, filename: "assistant-reply.mp3", mimeType: "audio/mpeg" };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw new Error(`TTS request timed out after ${timeoutMs}ms`);
 }
 
 // --- Public API ---
@@ -168,9 +183,17 @@ export async function synthesizeSpeech(text: string): Promise<TtsResult> {
     }
     return await synthesizeWithOpenAi(input);
   } catch (err) {
-    if (err instanceof DOMException && err.name === "AbortError") {
-      throw new Error(`TTS request timed out after ${TTS_REQUEST_TIMEOUT_MS}ms`);
+    if (isTimeoutError(err)) {
+      throw new Error(`TTS request timed out after ${getTtsRequestTimeoutMs()}ms`);
     }
     throw err;
   }
+}
+
+function getTtsRequestTimeoutMs(): number {
+  return config.tts.requestTimeoutMs || DEFAULT_TTS_REQUEST_TIMEOUT_MS;
+}
+
+function isTimeoutError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }

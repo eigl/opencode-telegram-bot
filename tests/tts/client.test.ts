@@ -32,6 +32,7 @@ const mockTts = vi.hoisted(() => ({
   provider: "openai" as string,
   model: "gpt-4o-mini-tts",
   voice: "alloy",
+  requestTimeoutMs: 60_000,
 }));
 
 vi.mock("../../src/config.js", () => ({
@@ -246,8 +247,8 @@ describe("synthesizeSpeech (OpenAI)", () => {
 
     const result = await synthesizeSpeech("Hello world");
 
-    expect(result.filename).toBe("assistant-reply.mp3");
-    expect(result.mimeType).toBe("audio/mpeg");
+    expect(result.filename).toBe("assistant-reply.ogg");
+    expect(result.mimeType).toBe("audio/ogg");
     expect(result.buffer).toEqual(Buffer.from([1, 2, 3]));
 
     expect(fetchSpy).toHaveBeenCalledOnce();
@@ -262,8 +263,25 @@ describe("synthesizeSpeech (OpenAI)", () => {
       model: "gpt-4o-mini-tts",
       voice: "alloy",
       input: "Hello world",
-      response_format: "mp3",
+      response_format: "opus",
     });
+  });
+
+  it("retries once when OpenAI-compatible TTS times out", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new DOMException("aborted", "AbortError"))
+      .mockResolvedValueOnce(
+        new Response(Uint8Array.from([1, 2, 3]), {
+          status: 200,
+          headers: { "Content-Type": "audio/mpeg" },
+        }),
+      );
+
+    const result = await synthesizeSpeech("Hello world");
+
+    expect(result.buffer).toEqual(Buffer.from([1, 2, 3]));
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
   it("throws on non-OK HTTP response", async () => {

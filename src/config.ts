@@ -188,6 +188,7 @@ export const config = {
       provider,
       model: getEnvVar("TTS_MODEL", false) || "gpt-4o-mini-tts",
       voice: getEnvVar("TTS_VOICE", false) || defaultVoice,
+      requestTimeoutMs: getOptionalPositiveIntEnvVar("TTS_REQUEST_TIMEOUT_MS", 60_000),
     };
   })(),
 };
