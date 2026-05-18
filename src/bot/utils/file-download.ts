@@ -7,11 +7,49 @@ import { config } from "../../config.js";
 import { buildTelegramFileUrl } from "./telegram-file-url.js";
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB Telegram limit
+const DOWNLOAD_ATTEMPTS = 3;
+const DOWNLOAD_RETRY_DELAY_MS = 500;
 
 export interface DownloadedFile {
   buffer: Buffer;
   filePath: string;
   mimeType?: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDownloadError(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = error.cause instanceof Error ? `; cause: ${error.cause.message}` : "";
+    return `${error.name}: ${error.message}${cause}`;
+  }
+
+  return String(error);
+}
+
+async function fetchWithRetry(url: string, options: RequestInit): Promise<Response> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt++) {
+    try {
+      return await nodeFetch(url, options);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt === DOWNLOAD_ATTEMPTS) {
+        break;
+      }
+
+      logger.warn(
+        `[FileDownload] Download attempt ${attempt}/${DOWNLOAD_ATTEMPTS} failed: ${formatDownloadError(error)}`,
+      );
+      await sleep(DOWNLOAD_RETRY_DELAY_MS * attempt);
+    }
+  }
+
+  throw new Error(`Failed to download file after ${DOWNLOAD_ATTEMPTS} attempts: ${formatDownloadError(lastError)}`);
 }
 
 /**
@@ -55,7 +93,7 @@ export async function downloadTelegramFile(api: Api, fileId: string): Promise<Do
     };
   }
 
-  const response = await nodeFetch(fileUrl, fetchOptions);
+  const response = await fetchWithRetry(fileUrl, fetchOptions);
 
   if (!response.ok) {
     throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);

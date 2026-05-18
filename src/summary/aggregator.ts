@@ -1,4 +1,4 @@
-import { Event, ToolState } from "@opencode-ai/sdk/v2";
+import { Event, FilePart, ToolState } from "@opencode-ai/sdk/v2";
 import type { Bot } from "grammy";
 import type { CodeFileData } from "./formatter.js";
 import { normalizePathForDisplay, prepareCodeFile } from "./formatter.js";
@@ -73,9 +73,20 @@ export interface ToolFileInfo extends ToolInfo {
   fileData: CodeFileData;
 }
 
+export interface AssistantFileInfo {
+  sessionId: string;
+  messageId: string;
+  partId: string;
+  mime: string;
+  filename?: string;
+  url: string;
+}
+
 type ToolCallback = (toolInfo: ToolInfo) => void;
 
 type ToolFileCallback = (fileInfo: ToolFileInfo) => void;
+
+type AssistantFileCallback = (fileInfo: AssistantFileInfo) => void;
 
 type QuestionCallback = (questions: Question[], requestID: string, sessionId: string) => void;
 
@@ -215,6 +226,7 @@ class SummaryAggregator {
   private onExternalUserInputCallback: ExternalUserInputCallback | null = null;
   private onToolCallback: ToolCallback | null = null;
   private onToolFileCallback: ToolFileCallback | null = null;
+  private onAssistantFileCallback: AssistantFileCallback | null = null;
   private onQuestionCallback: QuestionCallback | null = null;
   private onQuestionErrorCallback: QuestionErrorCallback | null = null;
   private onThinkingCallback: ThinkingCallback | null = null;
@@ -230,6 +242,7 @@ class SummaryAggregator {
   private onFileChangeCallback: FileChangeCallback | null = null;
   private onClearedCallback: ClearedCallback | null = null;
   private processedToolStates: Set<string> = new Set();
+  private deliveredAssistantFilePartIds: Set<string> = new Set();
   private thinkingFiredForMessages: Set<string> = new Set();
   private deliveredExternalUserMessageIds: Set<string> = new Set();
   private knownTextPartIds: Map<string, Set<string>> = new Map();
@@ -270,6 +283,10 @@ class SummaryAggregator {
 
   setOnToolFile(callback: ToolFileCallback): void {
     this.onToolFileCallback = callback;
+  }
+
+  setOnAssistantFile(callback: AssistantFileCallback): void {
+    this.onAssistantFileCallback = callback;
   }
 
   setOnQuestion(callback: QuestionCallback): void {
@@ -456,6 +473,7 @@ class SummaryAggregator {
     this.partHashes.clear();
     this.knownTextPartIds.clear();
     this.processedToolStates.clear();
+    this.deliveredAssistantFilePartIds.clear();
     this.thinkingFiredForMessages.clear();
     this.deliveredExternalUserMessageIds.clear();
     this.trackedSessionParents.clear();
@@ -1198,7 +1216,9 @@ class SummaryAggregator {
       return;
     }
 
-    if (part.type === "reasoning") {
+    if (part.type === "file") {
+      this.emitAssistantFilePart(part as FilePart, messageInfo?.role);
+    } else if (part.type === "reasoning") {
       // Fire the thinking callback once per message on the first reasoning part.
       // This is the signal that the model is actually doing extended thinking.
       if (!this.thinkingFiredForMessages.has(messageID) && this.onThinkingCallback) {
@@ -1527,6 +1547,26 @@ class SummaryAggregator {
     }
 
     return state.orderedPartIds.map((partID) => state.partTexts.get(partID) || "").join("");
+  }
+
+  private emitAssistantFilePart(part: FilePart, role: string | undefined): void {
+    if (role !== "assistant" || !this.onAssistantFileCallback) {
+      return;
+    }
+
+    if (this.deliveredAssistantFilePartIds.has(part.id)) {
+      return;
+    }
+
+    this.deliveredAssistantFilePartIds.add(part.id);
+    this.onAssistantFileCallback({
+      sessionId: part.sessionID,
+      messageId: part.messageID,
+      partId: part.id,
+      mime: part.mime,
+      filename: part.filename,
+      url: part.url,
+    });
   }
 
   private prepareToolFileContext(

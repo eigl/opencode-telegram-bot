@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Api } from "grammy";
 import { Agent as HttpsAgent } from "https";
 import {
+  downloadTelegramFile,
   toDataUri,
   formatFileSize,
   isFileSizeAllowed,
@@ -15,6 +16,53 @@ vi.mock("node-fetch", () => ({
 }));
 
 describe("bot/utils/file-download", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    nodeFetchMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  describe("downloadTelegramFile", () => {
+    it("retries transient fetch failures", async () => {
+      const api = {
+        getFile: vi.fn().mockResolvedValue({ file_path: "photos/photo.jpg" }),
+      } as never;
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError("fetch failed"))
+        .mockResolvedValueOnce(new Response("image-bytes"));
+      nodeFetchMock.mockImplementation(fetchMock);
+
+      const downloadPromise = downloadTelegramFile(api, "file-id");
+      await vi.advanceTimersByTimeAsync(500);
+      const result = await downloadPromise;
+
+      expect(result.buffer.toString()).toBe("image-bytes");
+      expect(result.filePath).toBe("photos/photo.jpg");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("includes retry context when download keeps failing", async () => {
+      const api = {
+        getFile: vi.fn().mockResolvedValue({ file_path: "photos/photo.jpg" }),
+      } as never;
+      nodeFetchMock.mockRejectedValue(new TypeError("fetch failed"));
+
+      const downloadPromise = downloadTelegramFile(api, "file-id");
+      const expectation = expect(downloadPromise).rejects.toThrow(
+        "Failed to download file after 3 attempts: TypeError: fetch failed",
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await expectation;
+    });
+  });
+
   describe("toDataUri", () => {
     it("converts buffer to base64 data URI with correct MIME type", () => {
       const buffer = Buffer.from("Hello, World!");
