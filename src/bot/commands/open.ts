@@ -5,13 +5,13 @@ import { interactionManager } from "../../interaction/manager.js";
 import { isForegroundBusy, replyBusyBlocked } from "../utils/busy-guard.js";
 import {
   pathToDisplayPath,
-  scanDirectory,
   buildEntryLabel,
   buildTreeHeader,
   isScanError,
   MAX_ENTRIES_PER_PAGE,
   type DirectoryEntry,
 } from "../utils/file-tree.js";
+import { scanRemoteDirectory } from "../utils/remote-file-tree.js";
 import { getBrowserRoots, isWithinAllowedRoot, isAllowedRoot } from "../utils/browser-roots.js";
 import { upsertSessionDirectory } from "../../session/cache-manager.js";
 import { getProjectByWorktree } from "../../project/manager.js";
@@ -190,7 +190,7 @@ function buildBrowseKeyboard(
 }
 
 async function renderBrowseView(dirPath: string, page: number = 0) {
-  const result = await scanDirectory(dirPath, page);
+  const result = await scanRemoteDirectory(dirPath, page);
 
   if (isScanError(result)) {
     return { error: result.error };
@@ -236,11 +236,13 @@ export async function openCommand(ctx: CommandContext<Context>) {
       // Single root — navigate directly into it
       const view = await renderBrowseView(roots[0]);
       if ("error" in view) {
-        await ctx.reply(t("open.scan_error", { error: view.error }));
+        const errorMessage = view.error ?? "Unknown error";
+        await ctx.reply(t("open.scan_error", { error: errorMessage }));
         return;
+      } else {
+        text = view.text;
+        keyboard = view.keyboard;
       }
-      text = view.text;
-      keyboard = view.keyboard;
     } else {
       // Multiple roots — show root selection
       text = t("open.select_root");

@@ -41,6 +41,10 @@ vi.mock("../../../src/bot/utils/file-tree.js", () => ({
   MAX_ENTRIES_PER_PAGE: 8,
 }));
 
+vi.mock("../../../src/bot/utils/remote-file-tree.js", () => ({
+  scanRemoteDirectory: mocked.scanDirectoryMock,
+}));
+
 vi.mock("../../../src/bot/utils/browser-roots.js", () => ({
   getBrowserRoots: mocked.getBrowserRootsMock,
   isWithinAllowedRoot: mocked.isWithinAllowedRootMock,
@@ -194,6 +198,25 @@ describe("open command", () => {
       await openCommand(ctx as never);
 
       expect(ctx.reply).toHaveBeenCalledWith(t("open.scan_error", { error: "Permission denied" }));
+    });
+
+    it("should browse configured roots through the OpenCode server", async () => {
+      mocked.getBrowserRootsMock.mockReturnValue(["/Users/lig"]);
+      mocked.isWithinAllowedRootMock.mockImplementation((target: string) =>
+        target.startsWith("/Users/lig"),
+      );
+      mocked.scanDirectoryMock.mockResolvedValue(
+        makeScanResult([{ name: "code", fullPath: "/Users/lig/code" }], "/Users/lig"),
+      );
+
+      const ctx = createCommandContext();
+      await openCommand(ctx as never);
+
+      expect(mocked.scanDirectoryMock).toHaveBeenCalledWith("/Users/lig", 0);
+      expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining("/Users/lig"), {
+        reply_markup: expect.anything(),
+      });
+      expect(mocked.interactionStartMock).toHaveBeenCalled();
     });
 
     it("should handle unexpected errors gracefully", async () => {
